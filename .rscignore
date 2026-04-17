@@ -1,4 +1,3 @@
 data/raw/*.gz
 data/raw/storm_events_raw_small.csv
-stat408_final_files/
-stat408_final.html
+stat408_final_files/libs/
