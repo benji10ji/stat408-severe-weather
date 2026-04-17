@@ -1,0 +1,14 @@
+# Downloaded NOAA data files — large, reproducible from code
+data/raw/*.csv
+data/raw/*.gz
+
+# Quarto render output
+/.quarto/
+*_files/
+*.html
+
+# R/RStudio
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj

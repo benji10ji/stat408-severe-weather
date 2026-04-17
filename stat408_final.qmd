@@ -1,0 +1,379 @@
+---
+title: "Is U.S. Severe Weather Becoming More Volatile?"
+subtitle: "An Exploratory Analysis of NOAA Storm Events (2016-2024)"
+author: "Benjamin Hobbs"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    theme: cosmo
+    code-fold: true
+    code-tools: true
+---
+
+## Introduction
+
+My goal is to investigate whether severe weather in the US appears to be becoming more volatile over time. By volatile, I mean not just more frequent on average, but more variable from year to year and harder to predict. This tutorial walks through how to access and clean the NOAA Storm Events database in R, and then uses several visualizations to study changes in event counts and variability across four severe convective weather event types from 2016 to 2024. This work is part of a larger research project where I plan to use machine learning and operations research for forecasting.
+
+### The Data
+
+The NOAA Storm Events database contains records of significant weather events across the United States going back to 1950. Each row represents a single event, with fields for event type, start date and time, state, location, injuries, deaths, and property damage. For this project I focus on four severe convective event types in the contiguous United States:
+
+- **Tornado**
+- **Hail**
+- **Thunderstorm Wind**
+- **Flash Flood**
+
+These four types are among the most frequently reported categories in the database and are all tied to the atmospheric instability variables I plan to model in the larger project.
+
+### What This Tutorial Covers
+
+Section 2 walks through downloading the raw NOAA files and cleaning the data in R. Section 3 explores trends and variability with several visualizations. Section 4 (in progress) will fit a Bayesian Poisson GLM to more formally study whether event frequency is trending upward over time.
+
+---
+
+## Accessing and Cleaning the Data
+
+### Setup
+
+```{r}
+#| output: false
+
+library(tidyverse)
+library(lubridate)
+library(rvest)
+library(here)
+
+# To save myself time later, I am going to store the resulting data in a folder
+RAW_DIR = here("data", "raw") # Specify the data path for the directory
+dir.create(RAW_DIR, recursive = TRUE, showWarnings = FALSE) # Create the directory
+```
+
+### Downloading the Data
+
+The NOAA Storm Events files are stored by year. This code reads the NOAA directory page, finds the yearly files I want, and downloads them only if they are not already saved locally. I extended the year range from the proposal to go back to 2016, which gives a longer view of trends. Because downloads are skipped for files that already exist, the code is safe to re-run if a download gets interrupted by a rate limit or network issue.
+
+```{r}
+#| message: true
+
+# This is the webpage that contains the files that I need, I need to
+# webscrape to get these files in this session
+base_url = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/"
+
+# Extend the data back to 2016 to get a longer view of trends
+years = 2016:2024
+
+# Read the html code for the NOAA website so I can get the files
+storm_index = read_html(base_url)
+
+# Pull only the links, keep only those with the yearly details pattern
+storm_files = storm_index |>
+  # Extract all HTML link elements <a> from the page
+  html_elements("a") |>
+  # Get the href attribute from each link, which contains the file name
+  html_attr("href") |>
+  # Turn the vector of file names into a tibble with one column called file
+  tibble(file = _) |>
+  # Keep files that match the NOAA Storm Events data format using Regex
+  # This pattern looks for names like:
+  # StormEvents_details-ftp_v1.0_d2024_c20260323.csv.gz
+  filter(str_detect(file,
+                  "^StormEvents_details-ftp_v1\\.0_d\\d{4}_c\\d{8}\\.csv\\.gz$")) |>
+  # Extract the 4-digit year from the file name and store it as an integer
+  mutate(year = as.integer(str_extract(file, "(?<=d)\\d{4}(?=_c)"))) |>
+  # Keep only the years selected above
+  filter(year %in% years) |>
+  # Keep only the years 2016-2024
+  arrange(year)
+
+# Function that downloads one NOAA file at a time
+download_one = function(file_name, dest_dir = RAW_DIR, pause = 1.5) {
+  # Create a succinct local file path where this file will be saved
+  dest = file.path(dest_dir, file_name)
+
+  # Only download the file if it is not already saved locally
+  if (!file.exists(dest)) {
+    message("Downloading: ", file_name)
+    # Wrap the download in a tryCatch so a failed request does not crash
+    # the render. It just prints a warning so I can re-run the file.
+    tryCatch(
+      download.file(
+        # Build the full web address for this specific file
+        url = paste0(base_url, file_name),
+        # Save the downloaded file to the destination path
+        destfile = dest,
+        # Binary writing mode, for compressed files
+        mode = "wb",
+        # Don't output anything
+        quiet = TRUE
+      ),
+      error = function(e) {
+        message("  Download failed: ", conditionMessage(e))
+        # Remove any partial file that was created
+        if (file.exists(dest)) file.remove(dest)
+      }
+    )
+    # Pause requests to avoid rate limit issues
+    Sys.sleep(pause)
+  } else {
+    message("Already cached: ", file_name)
+  }
+  # Return the file path
+  dest
+}
+
+# Now use the funtion to every NOAA file
+storm_paths = map_chr(storm_files$file, download_one)
+
+# Keep only paths that actually exist in case any downloads failed
+storm_paths_valid = storm_paths[file.exists(storm_paths)]
+```
+
+Reading nine gzipped CSV files on every render would be slow, so I save a combined CSV after the first run and load from that on subsequent renders.
+
+```{r}
+#| message: true
+
+# Path for the combined cache file
+combined_cache = file.path(RAW_DIR, "storm_events_raw_combined.csv")
+
+# Load from the cache if it already exists, otherwise read and combine all files
+if (file.exists(combined_cache)) {
+  message("Loading from cache...")
+  raw_combined = read_csv(combined_cache,
+                          col_types = cols(.default = col_character()),
+                          show_col_types = FALSE)
+} else {
+  # Read all downloaded files into R and combine them into one large data frame,
+  # this will not work everywhere, NOAA is fortunately consistent with data structure
+  # I read every column as character to avoid parsing problems across years
+  raw_combined = map_dfr(
+    storm_paths_valid,
+    ~ read_csv(.x, col_types = cols(.default = col_character()),
+               show_col_types = FALSE)
+  )
+  # Save the combined raw dataset as a CSV file so I can inspect it later
+  # without needing to re-download
+  write_csv(raw_combined, combined_cache)
+}
+```
+
+### Read and Clean the Data
+
+I will keep only the four event types I am interested in. I also extract both the year and month from the event date, since the variability analysis in Section 3 uses both.
+
+```{r}
+# Create a vector of the severe weather event types that I want to keep
+event_types_keep = c("Tornado", "Hail", "Thunderstorm Wind", "Flash Flood")
+
+# Filter the data to only include only the event types I want to examine
+# Also covert fields into their correct types
+severe_events = raw_combined |>
+  select(
+    BEGIN_DATE_TIME, EVENT_TYPE, STATE,
+    BEGIN_LAT, BEGIN_LON, INJURIES_DIRECT, DEATHS_DIRECT
+  ) |>
+  # Use %in% to keep only those event types
+  filter(EVENT_TYPE %in% event_types_keep) |>
+  mutate(
+
+    # Covert dates to a correct date-time format
+    begin_dt = ymd_hms(BEGIN_DATE_TIME),
+
+    # Extract the year
+    year = year(begin_dt),
+
+    # Extract the month for the variability analysis in Section 3
+    month = month(begin_dt),
+
+    # Convert latitude and longitude from character to numeric so they can
+    # be filtered
+    BEGIN_LAT = as.numeric(BEGIN_LAT),
+    BEGIN_LON = as.numeric(BEGIN_LON),
+
+    # Convert injuries and deaths from character to numeric
+    INJURIES_DIRECT = as.numeric(INJURIES_DIRECT),
+    DEATHS_DIRECT = as.numeric(DEATHS_DIRECT)
+  ) |>
+
+  # Added another layer of filters to make sure required fields are correct
+  filter(
+
+    # Keep only rows where the date-time was successfully parsed
+    !is.na(begin_dt),
+    year %in% years,
+
+    # Keep only rows with valid longitude and latitude values
+    !is.na(BEGIN_LON),
+    !is.na(BEGIN_LAT),
+
+    # Restrict the data to the approximate bounds of the continuous
+    # United States
+    between(BEGIN_LON, -125, -66),
+    between(BEGIN_LAT, 24, 50)
+  ) |>
+
+  # Keep all the cleaned stuff
+  select(
+    EVENT_TYPE, STATE, begin_dt, year, month,
+    BEGIN_LAT, BEGIN_LON,
+    INJURIES_DIRECT, DEATHS_DIRECT
+  )
+
+# Take a look at the data frame I just made
+glimpse(severe_events)
+```
+
+### Summary Statistics
+
+Here are some basic summaries of what is inside of our cleaned dataframe.
+
+```{r}
+# Some basic data descriptors
+severe_events |>
+  summarise(
+    total_events = n(),
+    first_year = min(year, na.rm = TRUE),
+    last_year = max(year, na.rm = TRUE),
+
+    # Look at how many injuries or the types kept there are
+    total_injuries = sum(INJURIES_DIRECT, na.rm = TRUE),
+    total_deaths = sum(DEATHS_DIRECT, na.rm = TRUE)
+  )
+```
+
+```{r}
+# Count how many of each severe event types there were
+severe_events |>
+  count(EVENT_TYPE, sort = TRUE)
+```
+
+---
+
+## Exploratory Analysis
+
+### Event Counts by Year
+
+```{r}
+# Create a line plot that shows how many of each event occurred a year
+severe_events |>
+  count(year, EVENT_TYPE) |>
+  ggplot(aes(x = year, y = n, color = EVENT_TYPE)) +
+  geom_line(linewidth = 1) +
+  geom_point() +
+  scale_x_continuous(breaks = years) +
+  labs(
+    title = "Severe Weather Events by Year",
+    x = "Year",
+    y = "Number of Events",
+    color = "Event Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+### Top States by Number of Events
+
+```{r}
+# Create a horizontal bar chart that looks at how many sever events in
+# general occur for each state in the US
+severe_events |>
+  # Just in case there are some obs with no listed state
+  filter(!is.na(STATE), STATE != "") |>
+  # Sorted so longest bar is on top
+  count(STATE, sort = TRUE) |>
+  # Only look at the top ten states
+  slice_head(n = 10) |>
+  ggplot(aes(x = reorder(STATE, n), y = n)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Top 10 States by Number of Recorded Events (2016-2024)",
+    x = "State",
+    y = "Number of Events"
+  ) +
+  theme_minimal()
+```
+
+With nine years of data, thunderstorm wind is still the most common event type by a wide margin and tornadoes remain the least common. Texas still leads the state totals, though this is at least partly a reflection of its size.
+
+### Monthly Variability by Year
+
+The annual counts above show average levels, but they do not show variability. A more direct way to look at volatility is to count events by month within each year and see how spread out that distribution is. If severe weather is becoming more volatile, we might expect the spread of monthly counts to widen in more recent years. The boxplot below shows that distribution for each year, with wider boxes indicating greater within-year variability.
+
+```{r}
+# Count events by year, month, and event type
+monthly_counts = severe_events |>
+  count(year, month, EVENT_TYPE)
+
+# Create a boxplot showing the distribution of monthly counts for each year
+# Wider boxes indicate more spread across months in that year
+monthly_counts |>
+  ggplot(aes(x = factor(year), y = n)) +
+  geom_boxplot(outlier.shape = 1, fill = "lightsteelblue", color = "steelblue4") +
+  facet_wrap(~EVENT_TYPE, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Monthly Event Count Distribution by Year",
+    subtitle = "Wider boxes indicate greater within-year variability",
+    x = "Year",
+    y = "Events per Month"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+### Annual Variability Summary
+
+The coefficient of variation (CV) divides the standard deviation of annual counts by the mean. It is a measure of how erratic the annual totals are relative to their average, so it is easier to compare across event types that have very different baseline counts. A higher CV means counts are more unpredictable from year to year.
+
+```{r}
+# Summarize annual event counts and compute the coefficient of variation
+annual_counts = severe_events |>
+  count(year, EVENT_TYPE)
+
+annual_counts |>
+  group_by(EVENT_TYPE) |>
+  summarise(
+    mean_annual = round(mean(n), 0),
+    sd_annual = round(sd(n), 1),
+    cv = round(sd(n) / mean(n), 3),
+    .groups = "drop"
+  ) |>
+  arrange(desc(cv)) |>
+  rename(
+    `Event Type` = EVENT_TYPE,
+    `Mean Annual Count` = mean_annual,
+    `Std Dev` = sd_annual,
+    `CV` = cv
+  )
+```
+
+### Annual Trends
+
+Adding a linear trend line to the annual counts gives a rough sense of direction for each event type. The confidence bands are wide relative to the trend lines, which is expected with only nine years of data and is itself a sign of how variable annual counts are.
+
+```{r}
+# Create a trend plot with linear fits and confidence bands for each event type
+annual_counts |>
+  ggplot(aes(x = year, y = n, color = EVENT_TYPE, fill = EVENT_TYPE)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.12, linewidth = 0.6) +
+  scale_x_continuous(breaks = years) +
+  labs(
+    title = "Annual Event Counts with Linear Trend (2016-2024)",
+    subtitle = "Shaded bands are 95% confidence intervals on the linear fit",
+    x = "Year",
+    y = "Annual Event Count",
+    color = "Event Type",
+    fill = "Event Type"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+These plots show that annual event counts vary quite a bit from year to year for Hail and Thunderstorm Wind. The confidence bands on the trend lines are wide enough that it is hard to draw strong conclusions from the visual alone, which is exactly why a more formal model is needed.
