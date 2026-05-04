@@ -13,6 +13,7 @@ library(tidyverse)
 library(lubridate)
 library(rvest)
 library(shiny)
+library(rstanarm)
 
 # Path for the combined cache file
 combined_cache = file.path("data", "raw", "storm_events_raw_combined.csv")
@@ -162,6 +163,69 @@ severe_events = raw_combined |>
     BEGIN_LAT, BEGIN_LON,
     INJURIES_DIRECT, DEATHS_DIRECT
   )
+
+# Count events by year and event type, then center year at 2020 to
+# reduce correlation between the intercept and slope posteriors
+annual_counts = severe_events |>
+  count(year, EVENT_TYPE) |>
+  mutate(year_c = year - 2020)
+
+# Path for the cached Stan model fits
+glm_cache = file.path("data", "raw", "glm_fits.rds")
+
+# Load from the cache if it already exists, otherwise fit the models
+if (file.exists(glm_cache)) {
+  glm_fits = readRDS(glm_cache)
+} else {
+  # Fit a separate Bayesian Poisson GLM for each event type
+  glm_fits = setNames(
+    map(event_types_keep, function(et) {
+      # Pull only the rows for this event type
+      df = filter(annual_counts, EVENT_TYPE == et)
+      stan_glm(
+        # Model the log event rate as a linear function of year
+        n ~ year_c,
+        # Poisson family with log link for count data
+        family = poisson(link = "log"),
+        data = df,
+        # Two chains with 1500 post-warmup draws each
+        chains = 2, iter = 2000, warmup = 500,
+        # Suppress progress messages, fix seed for reproducibility
+        refresh = 0, seed = 408
+      )
+    }),
+    event_types_keep
+  )
+  # Save the fitted models so the dashboard does not re-run MCMC on every load
+  saveRDS(glm_fits, glm_cache)
+}
+
+# Extract the posterior draws for the year coefficient and build a summary
+# table showing the mean, 90% credible interval, and P(trend > 0) per event type
+glm_summary = map_dfr(event_types_keep, function(et) {
+  # Pull posterior samples for the year coefficient from this fitted model
+  samps = as.data.frame(glm_fits[[et]])[["year_c"]]
+  tibble(
+    `Event Type` = et,
+    # Posterior mean of the year coefficient
+    `Mean` = round(mean(samps), 3),
+    # Lower and upper bounds of the 90% credible interval
+    `5th %` = round(quantile(samps, 0.05), 3),
+    `95th %` = round(quantile(samps, 0.95), 3),
+    # Share of posterior draws above zero
+    `P(trend > 0)` = round(mean(samps > 0), 2)
+  )
+}) |>
+  # Combine the two CI bound columns into a single display column
+  mutate(`90% CI` = paste0("[", `5th %`, ", ", `95th %`, "]")) |>
+  select(`Event Type`, `Mean`, `90% CI`, `P(trend > 0)`)
+
+# Collect all posterior draws into one data frame so they can be overlaid
+# in a density plot on the Trend Analysis page
+glm_posterior = map_dfr(event_types_keep, function(et) {
+  samps = as.data.frame(glm_fits[[et]])[["year_c"]]
+  tibble(EVENT_TYPE = et, coef = samps)
+})
 ```
 
 # About
@@ -300,6 +364,46 @@ tableOutput("varTable")
 plotOutput("varTrendPlot")
 ```
 
+# Trend Analysis
+
+## Row
+
+### What This Shows
+
+To move beyond visual inspection, I fit a Bayesian Poisson GLM for each event type:
+
+**log(E[count]) = B0 + B1 × (year − 2020)**
+
+B1 is the log-rate change per year. A positive value means events are trending up; negative means down. The 90% credible interval tells us how certain the posterior is. I used `rstanarm` with its default weakly informative priors and 2 chains × 1,500 post-warmup draws.
+
+### Posterior Summary
+
+```{r}
+knitr::kable(glm_summary, align = "lrrr",
+             caption = "Bayesian Poisson GLM: annual trend coefficient by event type")
+```
+
+## Row
+
+### Posterior Distribution of Annual Trend Coefficient
+
+```{r}
+glm_posterior |>
+  ggplot(aes(x = coef, fill = EVENT_TYPE, color = EVENT_TYPE)) +
+  geom_density(alpha = 0.25, linewidth = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             color = "gray30", linewidth = 0.8) +
+  labs(
+    title = "Posterior Distributions of the Annual Trend Coefficient (B1)",
+    subtitle = "Dashed line = no trend; mass to the right = upward trend",
+    x = "B1 (log-rate change per year)",
+    y = "Density",
+    fill = "Event Type",
+    color = "Event Type"
+  ) +
+  theme_minimal()
+```
+
 # Summary
 
 ## Row
@@ -308,17 +412,17 @@ plotOutput("varTrendPlot")
 
 Looking at NOAA Storm Events data from 2016 to 2024, a few patterns stand out. Tornado counts have the highest coefficient of variation across all four event types, meaning they are the most erratic relative to their average level even though they are the least common event type in absolute terms. Thunderstorm wind events are the most common by a wide margin but are also the most stable from year to year. Texas leads all states in total severe weather reports across all event types, though some of this reflects its size.
 
-The linear trend lines on the Variability page show mostly flat or slightly changing slopes, but the confidence bands are wide. With only nine years of data, it is hard to make strong statistical claims from the visual trends alone. A more formal test using a Bayesian Poisson GLM is the next step in this analysis.
+The Bayesian Poisson GLM on the Trend Analysis page finds credible trends for three of the four event types. Tornado counts show a credible upward trend, with a posterior mean log-rate change of +0.004 per year and a 90% credible interval entirely above zero (P(trend > 0) = 1.00). Thunderstorm wind and flash flood counts both show credible downward trends, with 90% credible intervals entirely below zero (P(trend > 0) = 0.00 for both). Hail shows no credible trend in either direction, with its credible interval straddling zero (P(trend > 0) = 0.61). These results suggest that the composition of severe weather is shifting rather than simply growing or shrinking in aggregate.
 
 This dashboard is part of a larger research project investigating whether physics-constrained neural networks can improve severe weather forecasting under non-stationary climate conditions.
 
 ### Additional Resources
 
-- [NOAA Storm Events Database](https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/) — Raw data source used in this project
-- [NOAA Storm Data Documentation](https://www.nws.noaa.gov/directives/sym/pd01016005curr.pdf) — Field definitions and methodology for the Storm Events dataset
-- [SPC Severe Weather Climatology](https://www.spc.noaa.gov/wcm/) — NOAA Storm Prediction Center historical data
-- [Gensini and Brooks (2018)](https://www.nature.com/articles/s41612-018-0048-2) — Spatial trends in US tornado frequency
-- [Brooks (2013)](https://www.sciencedirect.com/science/article/pii/S0169809512003153) — Severe thunderstorms and climate change
+- [NOAA Storm Events Database](https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/): Raw data source used in this project
+- [NOAA Storm Data Documentation](https://www.nws.noaa.gov/directives/sym/pd01016005curr.pdf): Field definitions and methodology for the Storm Events dataset
+- [SPC Severe Weather Climatology](https://www.spc.noaa.gov/wcm/): NOAA Storm Prediction Center historical data
+- [Gensini and Brooks (2018)](https://www.nature.com/articles/s41612-018-0048-2): Spatial trends in US tornado frequency
+- [Brooks (2013)](https://www.sciencedirect.com/science/article/pii/S0169809512003153): Severe thunderstorms and climate change
 
 ```{r}
 #| context: server

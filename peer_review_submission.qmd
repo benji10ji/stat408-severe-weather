@@ -1,0 +1,21 @@
+---
+title: "STAT 408 Peer Review Submission"
+author: "Benjamin Hobbs"
+date: today
+format: pdf
+---
+
+## GitHub Repository
+
+https://github.com/benji10ji/stat408-severe-weather
+
+The dashboard is also available at:
+https://z35ff9-benjamin-hobbs.shinyapps.io/stat408-severe-weather/
+
+## Questions for Feedback
+
+1. The dashboard has four pages (About, Event Trends, Variability, and Summary). Is it clear what each page is showing and why?
+
+2. The variability analysis uses the coefficient of variation (CV) to compare event types. Is this concept explained clearly enough for someone who has not seen it before?
+
+3. Is there anything missing that you would expect to see in a project about severe weather trends?
