@@ -1,4 +1,4 @@
-# Downloaded NOAA data files — large, reproducible from code
+# Downloaded NOAA data files, large, but reproducible from code
 data/raw/*.csv
 data/raw/*.gz
 

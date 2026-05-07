@@ -1,0 +1,34 @@
+---
+title: "Final Reflection"
+author: "Benjamin Hobbs"
+format: pdf
+date: today
+---
+
+## GitHub Repository and Dashboard
+
+repo: https://github.com/benji10ji/stat408-severe-weather
+
+Dashboard: https://z35ff9-benjamin-hobbs.shinyapps.io/stat408-severe-weather/
+
+## Reflection
+My project investigates whether severe weather in the United States is becoming more volatile over time. The goal was to do a bit more that just examine "are events increasing?" I, instead, wanted to see if year-to-year weather patterns are becoming more volatile. For this analysis, I focused on four convective event types, Tornado, Hail , Thunderstorm Wind, and Flash Floods, because they are well documented in the NOAA dataset, and are fairly severe common events. 
+
+This project stretched me in several ways. I used `rvest` to programmatically scrape and download nine years (2016–2024) of NOAA CSV files, something I had only done once before. R Shiny was entirely new to me, and learning reactive inputs and dashboard plotting was interesting. The biggest extension, though, was the Bayesian Poisson GLM. I had encountered Bayesian methods in my financial engineering classes and wanted an excuse to dig into priors, likelihoods, and posteriors. The framework is especially well-suited to weather because events are rarely certain, returning a distribution of possible outcomes lets the reviewer apply their own expertise to challenge the results.
+
+The dashboard eases the reader into the analysis one step at a time. The trends page establishes event counts and temporal dependencies as a baseline. The variability page then probes my hypothesis, letting readers see the volatility in the data for themselves. The trend analysis page formalizes that volatility through the GLM, and the summary page digests everything for the audience. The overarching goal is to show that events like tornadoes have changing volatility patterns. This work is the first step toward a larger research question on physics-constrained neural networks for forecasting, and the analysis convinced me the idea has merit. I'm excited to see where it leads.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

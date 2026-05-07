@@ -1,0 +1,14 @@
+name: stat408_final
+title: stat408_final
+username: z35ff9-benjamin-hobbs
+account: z35ff9-benjamin-hobbs
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 17314066
+bundleId: 11962996
+url: https://z35ff9-benjamin-hobbs.shinyapps.io/stat408_final/
+version: 1
+quarto_version: 1.8.26
+quarto_engines: knitr
+asMultiple: FALSE
+asStatic: FALSE

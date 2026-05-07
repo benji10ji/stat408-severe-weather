@@ -3,6 +3,7 @@ title: "Is U.S. Severe Weather Becoming More Volatile?"
 author: "Benjamin Hobbs"
 format: dashboard
 server: shiny
+engine: knitr
 ---
 
 ```{r}
@@ -13,7 +14,6 @@ library(tidyverse)
 library(lubridate)
 library(rvest)
 library(shiny)
-library(rstanarm)
 
 # Path for the combined cache file
 combined_cache = file.path("data", "raw", "storm_events_raw_combined.csv")
@@ -21,6 +21,9 @@ combined_cache = file.path("data", "raw", "storm_events_raw_combined.csv")
 # Load from the cache if it already exists, otherwise try to download
 if (file.exists(combined_cache)) {
   raw_combined = read_csv(combined_cache,
+                          col_select = c(BEGIN_DATE_TIME, EVENT_TYPE, STATE,
+                                         BEGIN_LAT, BEGIN_LON,
+                                         INJURIES_DIRECT, DEATHS_DIRECT),
                           col_types = cols(.default = col_character()),
                           show_col_types = FALSE)
 } else {
@@ -99,7 +102,10 @@ if (file.exists(combined_cache)) {
   # I read every column as character to avoid parsing problems across years
   raw_combined = map_dfr(
     storm_paths_valid,
-    ~ read_csv(.x, col_types = cols(.default = col_character()),
+    ~ read_csv(.x, col_select = c(BEGIN_DATE_TIME, EVENT_TYPE, STATE,
+                                   BEGIN_LAT, BEGIN_LON,
+                                   INJURIES_DIRECT, DEATHS_DIRECT),
+               col_types = cols(.default = col_character()),
                show_col_types = FALSE)
   )
 
@@ -164,68 +170,15 @@ severe_events = raw_combined |>
     INJURIES_DIRECT, DEATHS_DIRECT
   )
 
-# Count events by year and event type, then center year at 2020 to
-# reduce correlation between the intercept and slope posteriors
-annual_counts = severe_events |>
-  count(year, EVENT_TYPE) |>
-  mutate(year_c = year - 2020)
+```
 
-# Path for the cached Stan model fits
-glm_cache = file.path("data", "raw", "glm_fits.rds")
 
-# Load from the cache if it already exists, otherwise fit the models
-if (file.exists(glm_cache)) {
-  glm_fits = readRDS(glm_cache)
-} else {
-  # Fit a separate Bayesian Poisson GLM for each event type
-  glm_fits = setNames(
-    map(event_types_keep, function(et) {
-      # Pull only the rows for this event type
-      df = filter(annual_counts, EVENT_TYPE == et)
-      stan_glm(
-        # Model the log event rate as a linear function of year
-        n ~ year_c,
-        # Poisson family with log link for count data
-        family = poisson(link = "log"),
-        data = df,
-        # Two chains with 1500 post-warmup draws each
-        chains = 2, iter = 2000, warmup = 500,
-        # Suppress progress messages, fix seed for reproducibility
-        refresh = 0, seed = 408
-      )
-    }),
-    event_types_keep
-  )
-  # Save the fitted models so the dashboard does not re-run MCMC on every load
-  saveRDS(glm_fits, glm_cache)
-}
-
-# Extract the posterior draws for the year coefficient and build a summary
-# table showing the mean, 90% credible interval, and P(trend > 0) per event type
-glm_summary = map_dfr(event_types_keep, function(et) {
-  # Pull posterior samples for the year coefficient from this fitted model
-  samps = as.data.frame(glm_fits[[et]])[["year_c"]]
-  tibble(
-    `Event Type` = et,
-    # Posterior mean of the year coefficient
-    `Mean` = round(mean(samps), 3),
-    # Lower and upper bounds of the 90% credible interval
-    `5th %` = round(quantile(samps, 0.05), 3),
-    `95th %` = round(quantile(samps, 0.95), 3),
-    # Share of posterior draws above zero
-    `P(trend > 0)` = round(mean(samps > 0), 2)
-  )
-}) |>
-  # Combine the two CI bound columns into a single display column
-  mutate(`90% CI` = paste0("[", `5th %`, ", ", `95th %`, "]")) |>
-  select(`Event Type`, `Mean`, `90% CI`, `P(trend > 0)`)
-
-# Collect all posterior draws into one data frame so they can be overlaid
-# in a density plot on the Trend Analysis page
-glm_posterior = map_dfr(event_types_keep, function(et) {
-  samps = as.data.frame(glm_fits[[et]])[["year_c"]]
-  tibble(EVENT_TYPE = et, coef = samps)
-})
+```{r}
+#| context: setup
+# Load the pre-computed GLM results saved by 
+# the chunk in fit_models.R
+glm_summary = readRDS(file.path("data", "raw", "glm_summary.rds"))
+glm_posterior = readRDS(file.path("data", "raw", "glm_posterior.rds"))
 ```
 
 # About
